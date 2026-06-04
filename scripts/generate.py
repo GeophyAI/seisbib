@@ -1148,17 +1148,11 @@ def write_filter_page(
     seg_n = ct.get("seg", 0)
     eage_n = ct.get("eage", 0)
 
-    papers = [to_paper_dict(e) for e in entries]
-    papers_json = json.dumps(papers, ensure_ascii=False)
-    # HTML-escape for the hidden <div> container. textContent in the
-    # browser auto-decodes &amp; and &lt; before JSON.parse sees them.
-    papers_json_safe = papers_json.replace("&", "&amp;").replace("<", "&lt;")
-
-    # NOTE: filter page uses a hidden <div> instead of
-    # <script type="application/json"> because Material's
-    # instant-loading navigation strips script tags from swapped-in
-    # bodies. HTML-escape `&` and `<` so a stray char in any field
-    # value doesn't truncate the div early.
+    # The filter page no longer inlines the main-bib JSON; it fetches
+    # ../papers.json on init, which the homepage already preloads. This
+    # cut filter/index.html from ~84MB to ~100KB, fixing the "click
+    # filter → blank, must refresh" issue caused by Material's instant
+    # navigation choking on the huge inline payload.
     template = """---
 search:
   exclude: true
@@ -1342,10 +1336,9 @@ selected) and a free-text query. Results update live.
 <div id="fwibib-stats"></div>
 <div id="fwibib-results"></div>
 
-<div id="fwibib-data" hidden>__DATA__</div>
 <script>
 (function() {
-  var FILTER_REV = "rev13";
+  var FILTER_REV = "rev14-fetch";
   console.log("[filter] script loaded " + FILTER_REV);
   function init() {
     console.log("[filter] init() called " + FILTER_REV);
@@ -1354,14 +1347,27 @@ selected) and a free-text query. Results update live.
     if (resultsEl.dataset.initialized === '1') { console.log("[filter] already initialized, bailing"); return; }
     resultsEl.dataset.initialized = '1';
 
-    var dataEl = document.getElementById('fwibib-data');
-    var mainPapers = [];
-    try { mainPapers = JSON.parse(dataEl.textContent); }
-    catch (err) {
-      console.log("[filter] JSON parse failed: " + err);
-      resultsEl.innerHTML = '<p>Failed to parse paper data.</p>';
-      return;
-    }
+    // Fetch the main bib via the same papers.json the homepage uses.
+    // (~90MB raw / ~16MB gzip; browser-cached after first load.) This
+    // replaces an 84MB inline <div> in the HTML, so the filter page
+    // itself loads instantly via Material's instant-navigation.
+    resultsEl.innerHTML = '<p style="opacity:.65">Loading bibliography…</p>';
+    // Always one level up from /filter/ — works for both
+    // /seisbib/filter/ and /seisbib/filter/index.html style URLs.
+    fetch('../papers.json').then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function(mainPapers) {
+      console.log("[filter] fetched " + mainPapers.length + " main papers");
+      initWithData(resultsEl, mainPapers);
+    }).catch(function(err) {
+      console.log("[filter] fetch failed: " + err);
+      resultsEl.innerHTML = '<p>Failed to load filter data: ' + err + '</p>';
+      resultsEl.dataset.initialized = '';   // allow retry on next nav
+    });
+  }
+
+  function initWithData(resultsEl, mainPapers) {
     // Total searchable corpus: main + any loaded catalogs.
     // SEG/EAGE entries are loaded on demand (~30+60MB JSON each)
     // when the user ticks the corresponding source checkbox.
@@ -1743,7 +1749,6 @@ selected) and a free-text query. Results update live.
 """
     content = (
         template
-        .replace("__DATA__", papers_json_safe)
         .replace("__MAIN_N__", f"{main_n:,}")
         .replace("__SEG_N__", f"{seg_n:,}")
         .replace("__EAGE_N__", f"{eage_n:,}")

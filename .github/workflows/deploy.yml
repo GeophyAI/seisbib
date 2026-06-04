@@ -1,0 +1,71 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Don't cancel an in-progress deploy — Pages can end up in a half-built
+# state. Queue the next run instead.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 28 min locally → ~60 min on GitHub runners; 120 min is safety margin.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # shallow clone — we don't need history for build
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install MkDocs and plugins
+        run: pip install -r requirements-docs.txt
+
+      - name: Validate bib
+        run: python scripts/validate.py
+
+      - name: Generate docs/ from bib files
+        run: python scripts/generate.py
+
+      - name: Build MkDocs site
+        # NOTE: NOT --strict. Some by-year/by-journal pages contain text
+        # like "010" or "article" that MkDocs warns about as
+        # "unrecognized relative link"; these are harmless. Run a local
+        # `mkdocs build --strict` if you want to audit warnings.
+        run: mkdocs build
+
+      - name: Report built site size
+        run: |
+          du -sh site/ || true
+          find site/ -type f -size +50M -printf "%s %p\n" | \
+            awk '{ printf "  WARNING %6.1f MB  %s\n", $1/1024/1024, $2 }'
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
